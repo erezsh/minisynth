@@ -29,8 +29,27 @@ GRAMMAR = """
 %ignore WS
 """.strip()
 
-@lark.v_args(inline=True)
-class Interp(lark.Transformer):
+class Transformer:
+    "A tree transformer inspired by Lark's transformers"
+
+    depth = 0
+
+    def transform(self, tree):
+        self.depth += 1
+        children = [self.transform(c) if isinstance(c, lark.Tree) else c for c in tree.children]
+        self.depth -= 1
+        try:
+            f = getattr(self, tree.data)
+        except AttributeError:
+            return self.__default__(tree.data, *children)
+        else:
+            return f(*children)
+
+    def __default__(self, data, children):
+        raise Exception("Unhandled node", data, children)
+
+
+class Interp(Transformer):
     def __init__(self, lookup):
         self.lookup = lookup
 
@@ -53,20 +72,11 @@ def interp(tree, lookup):
     return Interp(lookup).transform(tree)
 
 
-@lark.v_args(inline=True)
-class Pretty(lark.Transformer):
+class Pretty(Transformer):
     """Pretty-print a tree, with optional substitutions applied."""
-
-    def _transform_tree(self, tree):
-        "Replace internal function to keep track of depth"
-        self.depth += 1
-        children = list(self._transform_children(tree.children))
-        self.depth -= 1
-        return self._call_userfunc(tree, children)
 
     def __init__(self, subst):
         self.subst = subst
-        self.depth = 0
 
     def par(self, s):
         return '('+s+')' if self.depth else s
@@ -83,9 +93,8 @@ class Pretty(lark.Transformer):
     def cond(self, cond, true, false):
         return self.par('{} ? {} : {}'.format(cond, true, false))
 
-    def __default__(self, op, children, meta):
+    def __default__(self, op, lhs, rhs):
         assert op in ('add', 'sub', 'mul', 'div', 'shl', 'shr')
-        lhs, rhs = children
         c = {
             'add': '+',
             'sub': '-',
