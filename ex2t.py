@@ -6,7 +6,7 @@ import sys
 # https://github.com/lark-parser/lark/wiki/Examples
 GRAMMAR = """
 ?start: sum
-  | sum "?" sum ":" sum -> if
+  | sum "?" sum ":" sum -> cond
 
 ?sum: term
   | sum "+" term        -> add
@@ -15,8 +15,8 @@ GRAMMAR = """
 ?term: item
   | term "*"  item      -> mul
   | term "/"  item      -> div
-  | term ">>" item      -> shr
-  | term "<<" item      -> shl
+  | term ">>" item      -> rshift
+  | term "<<" item      -> lshift
 
 ?item: NUMBER           -> num
   | "-" item            -> neg
@@ -29,85 +29,82 @@ GRAMMAR = """
 %ignore WS
 """.strip()
 
+class Transformer:
+    "A tree transformer inspired by Lark's transformers"
 
-def interp(tree, lookup):
-    """Evaluate the arithmetic expression.
+    depth = 0
 
-    Pass a tree as a Lark `Tree` object for the parsed expression. For
-    `lookup`, provide a function for mapping variable names to values.
-    """
+    def transform(self, tree):
+        self.depth += 1
+        children = [self.transform(c) if isinstance(c, lark.Tree) else c for c in tree.children]
+        self.depth -= 1
+        try:
+            f = getattr(self, tree.data)
+        except AttributeError:
+            return self.__default__(tree.data, *children)
+        else:
+            return f(*children)
 
-    op = tree.data
-    if op in ('add', 'sub', 'mul', 'div', 'shl', 'shr'):  # Binary operators.
-        lhs = interp(tree.children[0], lookup)
-        rhs = interp(tree.children[1], lookup)
-        if op == 'add':
-            return lhs + rhs
-        elif op == 'sub':
-            return lhs - rhs
-        elif op == 'mul':
-            return lhs * rhs
-        elif op == 'div':
-            return lhs / rhs
-        elif op == 'shl':
-            return lhs << rhs
-        elif op == 'shr':
-            return lhs >> rhs
-    elif op == 'neg':  # Negation.
-        sub = interp(tree.children[0], lookup)
-        return -sub
-    elif op == 'num':  # Literal number.
-        return int(tree.children[0])
-    elif op == 'var':  # Variable lookup.
-        return lookup(tree.children[0])
-    elif op == 'if':  # Conditional.
-        cond = interp(tree.children[0], lookup)
-        true = interp(tree.children[1], lookup)
-        false = interp(tree.children[2], lookup)
+    def __default__(self, data, children):
+        raise Exception("Unhandled node", data, children)
+
+
+class Interp(Transformer):
+    def __init__(self, lookup):
+        self.lookup = lookup
+
+    from operator import (
+        add, sub, mul, neg, lshift, rshift,
+        truediv as div,
+    )
+
+    num = int
+
+    def var(self, n):
+        return self.lookup(n)
+
+    def cond(self, cond, true, false):
         return (cond != 0) * true + (cond == 0) * false
 
+def interp(tree, lookup):
+    return Interp(lookup).transform(tree)
 
-def pretty(tree, subst={}, paren=False):
-    """Pretty-print a tree, with optional substitutions applied.
 
-    If `paren` is true, then loose-binding expressions are
-    parenthesized. We simplify boolean expressions "on the fly."
-    """
+class Pretty(Transformer):
+    """Pretty-print a tree, with optional substitutions applied."""
 
-    # Add parentheses?
-    if paren:
-        def par(s):
-            return '({})'.format(s)
-    else:
-        def par(s):
-            return s
+    def __init__(self, subst):
+        self.subst = subst
 
-    op = tree.data
-    if op in ('add', 'sub', 'mul', 'div', 'shl', 'shr'):
-        lhs = pretty(tree.children[0], subst, True)
-        rhs = pretty(tree.children[1], subst, True)
+    def par(self, s):
+        return '('+s+')' if self.depth else s
+
+    def neg(self, x):
+        return '-' + x
+
+    def num(self, n):
+        return n
+
+    def var(self, name):
+        return str(self.subst.get(name, name))
+
+    def cond(self, cond, true, false):
+        return self.par('{} ? {} : {}'.format(cond, true, false))
+
+    def __default__(self, op, lhs, rhs):
+        assert op in ('add', 'sub', 'mul', 'div', 'lshift', 'rshift')
         c = {
             'add': '+',
             'sub': '-',
             'mul': '*',
             'div': '/',
-            'shl': '<<',
-            'shr': '>>',
+            'lshift': '<<',
+            'rshift': '>>',
         }[op]
-        return par('{} {} {}'.format(lhs, c, rhs))
-    elif op == 'neg':
-        sub = pretty(tree.children[0], subst)
-        return '-{}'.format(sub, True)
-    elif op == 'num':
-        return tree.children[0]
-    elif op == 'var':
-        name = tree.children[0]
-        return str(subst.get(name, name))
-    elif op == 'if':
-        cond = pretty(tree.children[0], subst)
-        true = pretty(tree.children[1], subst)
-        false = pretty(tree.children[2], subst)
-        return par('{} ? {} : {}'.format(cond, true, false))
+        return self.par('{} {} {}'.format(lhs, c, rhs))
+
+def pretty(tree, subst={}):
+    return Pretty(subst).transform(tree)
 
 
 def run(tree, env):
